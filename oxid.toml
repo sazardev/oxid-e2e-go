@@ -1,0 +1,18 @@
+[project]
+name = "e2e-go"
+
+[routing]
+base_domain = "e2e-go.local.dev"
+port = 8080
+
+[build]
+
+[dependencies.database]
+type = "postgres"
+shared_instance = "oxid-e2e-pg"
+inject_url_as = "DATABASE_URL"
+
+[dependencies.cache]
+type = "redis"
+shared_instance = "oxid-e2e-redis"
+inject_url_as = "REDIS_URL"
