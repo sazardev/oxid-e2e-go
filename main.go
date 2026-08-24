@@ -51,28 +51,35 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// respDo sends one RESP command and returns the bulk/string reply.
+// respDo pipelines SELECT (optional) plus one command as *separate*
+// RESP arrays on one connection and returns the final reply.
 func respDo(addr string, selectDB int, args ...string) (string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-	cmds := args
-	if selectDB >= 0 {
-		cmds = append([]string{"SELECT", strconv.Itoa(selectDB)}, args...)
-	}
+	conn.SetDeadline(time.Now().Add(4 * time.Second))
 	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(cmds))
-	for _, a := range cmds {
-		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+	writeCmd := func(cmd ...string) {
+		fmt.Fprintf(&b, "*%d\r\n", len(cmd))
+		for _, a := range cmd {
+			fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+		}
 	}
+	total := 1
+	if selectDB >= 0 {
+		writeCmd("SELECT", strconv.Itoa(selectDB))
+		total++
+	}
+	writeCmd(args...)
+
 	if _, err := conn.Write([]byte(b.String())); err != nil {
 		return "", err
 	}
 	r := bufio.NewReader(conn)
 	var last string
-	for i := 0; i < len(cmds); i++ {
+	for i := 0; i < total; i++ {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return "", err
