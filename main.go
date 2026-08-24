@@ -35,49 +35,60 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Minimal RESP client: SELECT + INCR + EXPIRE, enough for a fixed-window
-// limiter. selectDB < 0 skips the SELECT (single-DB connections).
-func respDo(addr string, selectDB int, args ...string) ([]string, error) {
+// Minimal RESP client: pipelines SELECT (optional) plus every command as
+// its own RESP array on one connection. selectDB < 0 skips the SELECT.
+func respDo(addr string, selectDB int, cmds ...[]string) ([]string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	cmds := args
-	if selectDB >= 0 {
-		cmds = append([]string{"SELECT", strconv.Itoa(selectDB)}, args...)
-	}
+	conn.SetDeadline(time.Now().Add(4 * time.Second))
 	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(cmds))
-	for _, a := range cmds {
-		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+	writeCmd := func(cmd ...string) {
+		fmt.Fprintf(&b, "*%d\r\n", len(cmd))
+		for _, a := range cmd {
+			fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+		}
 	}
+	all := cmds
+	if selectDB >= 0 {
+		all = append([][]string{{"SELECT", strconv.Itoa(selectDB)}}, cmds...)
+	}
+	for _, c := range all {
+		writeCmd(c...)
+	}
+	total := len(all)
 	if _, err := conn.Write([]byte(b.String())); err != nil {
 		return nil, err
 	}
 	r := bufio.NewReader(conn)
 	var out []string
-	for range cmds {
+	for i := 0; i < total; i++ {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return out, err
 		}
 		switch {
-		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"):
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"), strings.HasPrefix(line, ":"):
 			out = append(out, strings.TrimRight(line[1:], "\r\n"))
-		case strings.HasPrefix(line, ":"), strings.HasPrefix(line, "$"):
-			out = append(out, strings.TrimSpace(strings.TrimRight(line[1:], "\r\n")))
-			if strings.HasPrefix(line, "$") {
-				n, _ := strconv.Atoi(out[len(out)-1])
-				buf := make([]byte, n+2)
-				if _, err := io.ReadFull(r, buf); err != nil {
-					return out, err
-				}
-				out[len(out)-1] = string(buf[:n])
+		case strings.HasPrefix(line, "$"):
+			n, _ := strconv.Atoi(strings.TrimRight(line[1:], "\r\n"))
+			buf := make([]byte, n+2)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return out, err
 			}
+			out = append(out, string(buf[:n]))
 		}
 	}
 	return out, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func index(w http.ResponseWriter, _ *http.Request) {
@@ -99,7 +110,7 @@ func limited(rawURL, ip string) (allowed bool, remaining int64, err error) {
 	if len(parts) == 2 {
 		idx, _ = strconv.Atoi(parts[1])
 	}
-	res, err := respDo(addr, idx, "INCR", "rl:"+ip, "EXPIRE", "60")
+	res, err := respDo(addr, idx, []string{"INCR", "rl:" + ip}, []string{"EXPIRE", "60"})
 	if err != nil || len(res) < 2 {
 		// Fail open: redis unreachable must not take the API down.
 		return true, LIMIT, err
