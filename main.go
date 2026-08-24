@@ -35,16 +35,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Minimal RESP client: INCR + EXPIRE, enough for a fixed-window limiter.
-func respDo(addr string, args ...string) ([]string, error) {
+// Minimal RESP client: SELECT + INCR + EXPIRE, enough for a fixed-window
+// limiter. selectDB < 0 skips the SELECT (single-DB connections).
+func respDo(addr string, selectDB int, args ...string) ([]string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
+	cmds := args
+	if selectDB >= 0 {
+		cmds = append([]string{"SELECT", strconv.Itoa(selectDB)}, args...)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(args))
-	for _, a := range args {
+	fmt.Fprintf(&b, "*%d\r\n", len(cmds))
+	for _, a := range cmds {
 		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 	}
 	if _, err := conn.Write([]byte(b.String())); err != nil {
@@ -52,7 +57,7 @@ func respDo(addr string, args ...string) ([]string, error) {
 	}
 	r := bufio.NewReader(conn)
 	var out []string
-	for range len(args) {
+	for range cmds {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			return out, err
@@ -85,8 +90,16 @@ func index(w http.ResponseWriter, _ *http.Request) {
 func healthz(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200); _, _ = w.Write([]byte("ok")) }
 
 // limited returns whether this IP is still under the fixed window limit.
-func limited(redisAddr, ip string) (allowed bool, remaining int64, err error) {
-	res, err := respDo(redisAddr, "INCR", "rl:"+ip, "EXPIRE", "60")
+// REDIS_URL carries the logical DB index as its URL path
+// (redis://host:port/N — how Oxid multiplexes branches onto one Redis).
+func limited(rawURL, ip string) (allowed bool, remaining int64, err error) {
+	raw := strings.TrimPrefix(rawURL, "redis://")
+	parts := strings.SplitN(raw, "/", 2)
+	addr, idx := parts[0], -1
+	if len(parts) == 2 {
+		idx, _ = strconv.Atoi(parts[1])
+	}
+	res, err := respDo(addr, idx, "INCR", "rl:"+ip, "EXPIRE", "60")
 	if err != nil || len(res) < 2 {
 		// Fail open: redis unreachable must not take the API down.
 		return true, LIMIT, err
@@ -102,12 +115,12 @@ func main() {
 
 	mux.Handle("/limited", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-		addr := strings.TrimPrefix(os.Getenv("REDIS_URL"), "redis://")
-		if addr == "" {
+		rawURL := os.Getenv("REDIS_URL")
+		if rawURL == "" {
 			writeJSON(w, 503, map[string]string{"error": "REDIS_URL not injected"})
 			return
 		}
-		ok, rem, err := limited(addr, ip)
+		ok, rem, err := limited(rawURL, ip)
 		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(LIMIT))
 		if rem > 0 {
 			w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(rem, 10))
