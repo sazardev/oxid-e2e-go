@@ -13,7 +13,7 @@ import (
 
 const (
 	BRANCH  = "main"
-	FEATURE = "stable API v1 (no extras)"
+	FEATURE = "stable API v1.1 (no extras)"
 )
 
 var startedAt = time.Now().UTC()
