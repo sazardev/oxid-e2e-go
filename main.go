@@ -60,17 +60,17 @@ func main() {
 			if err == nil {
 				defer db.Close()
 				var n int64
-				qerr := db.QueryRow(
+				// Every branch gets its own database — schema bootstrap
+				// is per-branch too.
+				if _, terr := db.Exec(`CREATE TABLE IF NOT EXISTS visits (
+					branch text primary key, hits bigint not null default 0)`); terr != nil {
+					body["pg_error"] = terr.Error()
+				} else if qerr := db.QueryRow(
 					`INSERT INTO visits (branch, hits) VALUES ($1, 1)
 					 ON CONFLICT (branch) DO UPDATE SET hits = visits.hits + 1
-					 RETURNING hits`, BRANCH).Scan(&n)
-				if qerr == nil {
+					 RETURNING hits`, BRANCH).Scan(&n); qerr == nil {
 					body["pg_visits"] = n
-				} else {
-					body["pg_error"] = qerr.Error()
 				}
-			} else {
-				body["pg_error"] = err.Error()
 			}
 		}
 		raw, _ := json.Marshal(body)
