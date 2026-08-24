@@ -52,40 +52,46 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // respDo sends one RESP command and returns the bulk/string reply.
-func respDo(addr string, args ...string) (string, error) {
+func respDo(addr string, selectDB int, args ...string) (string, error) {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
+	cmds := args
+	if selectDB >= 0 {
+		cmds = append([]string{"SELECT", strconv.Itoa(selectDB)}, args...)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(args))
-	for _, a := range args {
+	fmt.Fprintf(&b, "*%d\r\n", len(cmds))
+	for _, a := range cmds {
 		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 	}
 	if _, err := conn.Write([]byte(b.String())); err != nil {
 		return "", err
 	}
 	r := bufio.NewReader(conn)
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	switch {
-	case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"):
-		return strings.TrimRight(line[1:], "\r\n"), nil
-	case strings.HasPrefix(line, ":"):
-		return strings.TrimRight(line[1:], "\r\n"), nil
-	case strings.HasPrefix(line, "$"):
-		n, _ := strconv.Atoi(strings.TrimRight(line[1:], "\r\n"))
-		buf := make([]byte, n+2)
-		if _, err := io.ReadFull(r, buf); err != nil {
+	var last string
+	for i := 0; i < len(cmds); i++ {
+		line, err := r.ReadString('\n')
+		if err != nil {
 			return "", err
 		}
-		return string(buf[:n]), nil
-	default:
-		return "", fmt.Errorf("unexpected reply %q", line)
+		switch {
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"), strings.HasPrefix(line, ":"):
+			last = strings.TrimRight(line[1:], "\r\n")
+		case strings.HasPrefix(line, "$"):
+			n, _ := strconv.Atoi(strings.TrimRight(line[1:], "\r\n"))
+			buf := make([]byte, n+2)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return "", err
+			}
+			last = string(buf[:n])
+		default:
+			return "", fmt.Errorf("unexpected reply %q", line)
+		}
 	}
+	return last, nil
 }
 
 func visitsCount(db *sql.DB) (int64, error) {
@@ -104,7 +110,11 @@ func main() {
 
 	mux.HandleFunc("/v2", func(w http.ResponseWriter, _ *http.Request) {
 		out := map[string]any{"branch": BRANCH, "api_version": 2}
-		if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		if raw := os.Getenv("DATABASE_URL"); raw != "" {
+			dsn := raw
+			if !strings.Contains(dsn, "sslmode=") {
+				dsn += "?sslmode=disable"
+			}
 			db, err := sql.Open("postgres", dsn)
 			if err == nil {
 				defer db.Close()
@@ -129,8 +139,13 @@ func main() {
 			out["pg"] = "DATABASE_URL not injected"
 		}
 		if rurl := os.Getenv("REDIS_URL"); rurl != "" {
-			addr := strings.TrimPrefix(rurl, "redis://")
-			if v, err := respDo(addr, "INCR", "hits:"+BRANCH); err == nil {
+			raw := strings.TrimPrefix(rurl, "redis://")
+			parts := strings.SplitN(raw, "/", 2)
+			addr, idx := parts[0], -1
+			if len(parts) == 2 {
+				idx, _ = strconv.Atoi(parts[1])
+			}
+			if v, err := respDo(addr, idx, "INCR", "hits:"+BRANCH); err == nil {
 				out["redis_hits"] = v
 			} else {
 				out["redis_error"] = err.Error()
