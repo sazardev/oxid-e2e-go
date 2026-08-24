@@ -115,7 +115,15 @@ func limited(rawURL, ip string) (allowed bool, remaining int64, err error) {
 		// Fail open: redis unreachable must not take the API down.
 		return true, LIMIT, err
 	}
-	n, _ := strconv.ParseInt(res[0], 10, 64)
+	// Replies include SELECT's leading "+OK" when a DB was selected —
+	// grab the first integer reply regardless of position.
+	n := int64(0)
+	for _, r := range res {
+		if v, perr := strconv.ParseInt(r, 10, 64); perr == nil {
+			n = v
+			break
+		}
+	}
 	return n <= LIMIT, LIMIT - n, nil
 }
 
