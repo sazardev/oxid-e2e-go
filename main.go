@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -50,7 +51,11 @@ func main() {
 
 	mux.HandleFunc("/payload", func(w http.ResponseWriter, r *http.Request) {
 		body := map[string]any{"branch": BRANCH, "served_at": time.Now().UTC().Format(time.RFC3339)}
-		if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		if raw := os.Getenv("DATABASE_URL"); raw != "" {
+			dsn := raw
+			if !strings.Contains(dsn, "sslmode=") {
+				dsn += "?sslmode=disable"
+			}
 			db, err := sql.Open("postgres", dsn)
 			if err == nil {
 				defer db.Close()
