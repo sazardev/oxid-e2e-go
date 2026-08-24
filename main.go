@@ -14,7 +14,7 @@ import (
 
 const (
 	BRANCH  = "feat/metrics"
-	FEATURE = "Prometheus-style /metrics (stdlib only)"
+	FEATURE = "Prometheus-style /metrics v1.1 (adds go_version gauge)"
 )
 
 var (
@@ -57,6 +57,7 @@ func metrics(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "# TYPE process_uptime_seconds gauge\nprocess_uptime_seconds %f\n", time.Since(startedAt).Seconds())
 	fmt.Fprintf(w, "# TYPE go_goroutines gauge\ngo_goroutines %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(w, "# TYPE go_heap_alloc_bytes gauge\ngo_heap_alloc_bytes %d\n", ms.HeapAlloc)
+	fmt.Fprintf(w, "# TYPE go_version_info label\ngo_version_info{version=%q} 1\n", runtime.Version())
 }
 
 func main() {
